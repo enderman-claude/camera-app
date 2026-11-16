@@ -3,6 +3,7 @@ package dev.archbox.camera;
 import android.annotation.SuppressLint;
 import android.content.Context;
 import android.graphics.ImageFormat;
+import android.graphics.Rect;
 import android.graphics.SurfaceTexture;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
@@ -11,12 +12,15 @@ import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureFailure;
 import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.params.MeteringRectangle;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.Image;
 import android.media.ImageReader;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
+import android.util.Range;
+import android.util.Rational;
 import android.util.Size;
 import android.view.Surface;
 
@@ -26,12 +30,10 @@ import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Camera2 pipeline for one back camera: a 4:3 preview and 4:3 JPEG stills.
- *
- * Shots are numbered. takePhoto() returns the number immediately so the UI can
- * show the shot before the sensor has finished; the result arrives later through
- * onPhotoSaved or onShotFailed. Up to MAX_IN_FLIGHT shots can be pending at once.
- * Camera work runs on a background thread; listener callbacks run on the main thread.
+ * Camera2 pipeline for one back camera. Preview and stills share the aspect ratio
+ * chosen in settings. Shots are numbered: takePhoto() returns at once, and the result
+ * arrives later via onPhotoSaved or onShotFailed. Camera work runs on a background
+ * thread; listener callbacks run on the main thread.
  */
 public class CameraController {
 
@@ -42,14 +44,25 @@ public class CameraController {
         void onError(String message);
     }
 
+    /** What the open camera supports. Filled in by open(). */
+    public static class Limits {
+        public boolean hasManualFocus;
+        /** Focus in diopters at the closest focus the lens supports. */
+        public float minFocusDiopters;
+        public int evMin = -4;
+        public int evMax = 4;
+        public double evStep = 1.0 / 3.0;
+    }
+
     private static final long PREVIEW_MAX_AREA = 1920L * 1440L;
     private static final int MAX_IN_FLIGHT = 3;
 
     private final Context context;
     private final CameraManager manager;
     private final Listener listener;
+    private final CaptureSettings settings;
     private final Handler main = new Handler(Looper.getMainLooper());
-    private final CaptureSettings settings = new CaptureSettings();
+    private final Limits limits = new Limits();
 
     private final AtomicInteger nextShotId = new AtomicInteger(1);
     private final AtomicInteger inFlight = new AtomicInteger(0);
@@ -65,15 +78,17 @@ public class CameraController {
     private Surface previewSurface;
     private SurfaceTexture surfaceTexture;
     private int sensorOrientation;
+    private Rect activeArray;
 
-    public CameraController(Context context, Listener listener) {
+    public CameraController(Context context, Listener listener, CaptureSettings settings) {
         this.context = context.getApplicationContext();
         this.manager = (CameraManager) context.getSystemService(Context.CAMERA_SERVICE);
         this.listener = listener;
+        this.settings = settings;
     }
 
-    public CaptureSettings settings() {
-        return settings;
+    public Limits limits() {
+        return limits;
     }
 
     public int inFlight() {
@@ -97,10 +112,13 @@ public class CameraController {
             }
             CameraCharacteristics cc = manager.getCameraCharacteristics(id);
             sensorOrientation = cc.get(CameraCharacteristics.SENSOR_ORIENTATION);
-            StreamConfigurationMap map = cc.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+            activeArray = cc.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
+            readLimits(cc);
 
-            Size preview = pick43(map.getOutputSizes(SurfaceTexture.class), PREVIEW_MAX_AREA);
-            Size still = pick43(map.getOutputSizes(ImageFormat.JPEG), 0);
+            StreamConfigurationMap map = cc.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+            float ratio = settings.aspect.ratio;
+            Size preview = pick(map.getOutputSizes(SurfaceTexture.class), ratio, PREVIEW_MAX_AREA);
+            Size still = pick(map.getOutputSizes(ImageFormat.JPEG), ratio, 0);
 
             surfaceTexture.setDefaultBufferSize(preview.getWidth(), preview.getHeight());
             previewSurface = new Surface(surfaceTexture);
@@ -111,6 +129,70 @@ public class CameraController {
         } catch (CameraAccessException | RuntimeException e) {
             fail("Could not open camera: " + e.getMessage());
         }
+    }
+
+    /** Re-sends the preview request so changed settings take effect. */
+    public void reapply() {
+        Handler h = handler;
+        if (h == null) return;
+        h.post(() -> {
+            if (device != null && session != null) startPreview(false);
+        });
+    }
+
+    /**
+     * Focuses and meters on a point. nx and ny are 0..1 across the viewfinder.
+     * The sensor mapping for portrait is approximate and still needs testing on hardware.
+     */
+    public void tapFocus(float nx, float ny) {
+        Handler h = handler;
+        if (h == null) return;
+        h.post(() -> {
+            if (device == null || session == null || activeArray == null || previewSurface == null) return;
+            Rect a = activeArray;
+            int w = a.width();
+            int hgt = a.height();
+            float sx;
+            float sy;
+            switch (sensorOrientation) {
+                case 0:
+                    sx = nx;
+                    sy = ny;
+                    break;
+                case 180:
+                    sx = 1 - nx;
+                    sy = 1 - ny;
+                    break;
+                case 270:
+                    sx = 1 - ny;
+                    sy = nx;
+                    break;
+                default:
+                    sx = ny;
+                    sy = 1 - nx;
+                    break;
+            }
+            int cx = a.left + Math.round(sx * (w - 1));
+            int cy = a.top + Math.round(sy * (hgt - 1));
+            int half = Math.max(16, w / 16);
+            Rect r = new Rect(
+                    Math.max(a.left, cx - half), Math.max(a.top, cy - half),
+                    Math.min(a.right - 1, cx + half), Math.min(a.bottom - 1, cy + half));
+            MeteringRectangle[] region = { new MeteringRectangle(r, MeteringRectangle.METERING_WEIGHT_MAX) };
+            try {
+                CaptureRequest.Builder b = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+                b.addTarget(previewSurface);
+                settings.applyTo(b, limits);
+                b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO);
+                b.set(CaptureRequest.CONTROL_AF_REGIONS, region);
+                b.set(CaptureRequest.CONTROL_AE_REGIONS, region);
+                b.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START);
+                session.capture(b.build(), null, handler);
+                startPreview(false);
+            } catch (CameraAccessException | IllegalStateException e) {
+                fail("Focus failed: " + e.getMessage());
+            }
+        });
     }
 
     /**
@@ -133,9 +215,7 @@ public class CameraController {
 
     public void close() {
         Handler h = handler;
-        if (h != null) {
-            h.post(this::cancelPending);
-        }
+        if (h != null) h.post(this::cancelPending);
         if (session != null) { session.close(); session = null; }
         if (device != null) { device.close(); device = null; }
         if (reader != null) { reader.close(); reader = null; }
@@ -145,6 +225,20 @@ public class CameraController {
 
     // ---- camera thread ----
 
+    private void readLimits(CameraCharacteristics cc) {
+        Float minFocus = cc.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE);
+        limits.minFocusDiopters = minFocus == null ? 0f : minFocus;
+        limits.hasManualFocus = limits.minFocusDiopters > 0f;
+
+        Range<Integer> ev = cc.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE);
+        if (ev != null) {
+            limits.evMin = ev.getLower();
+            limits.evMax = ev.getUpper();
+        }
+        Rational step = cc.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP);
+        if (step != null && step.getDenominator() != 0) limits.evStep = step.doubleValue();
+    }
+
     private void submit(int id) {
         try {
             if (device == null || session == null || reader == null) {
@@ -153,13 +247,25 @@ public class CameraController {
             CaptureRequest.Builder b = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
             b.addTarget(reader.getSurface());
             b.set(CaptureRequest.JPEG_ORIENTATION, sensorOrientation);
-            settings.applyTo(b);
+            settings.applyTo(b, limits);
             b.setTag(id);
             pendingIds.add(id);
             session.capture(b.build(), captureCallback, handler);
         } catch (CameraAccessException | IllegalStateException e) {
             pendingIds.remove(id);
             finish(id, "Capture failed: " + e.getMessage(), null);
+        }
+    }
+
+    private void startPreview(boolean announce) {
+        try {
+            CaptureRequest.Builder b = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+            b.addTarget(previewSurface);
+            settings.applyTo(b, limits);
+            session.setRepeatingRequest(b.build(), null, handler);
+            if (announce) ui(() -> listener.onStatus("Ready"));
+        } catch (CameraAccessException | IllegalStateException e) {
+            fail("Preview failed: " + e.getMessage());
         }
     }
 
@@ -183,7 +289,7 @@ public class CameraController {
             ByteBuffer buf = image.getPlanes()[0].getBuffer();
             byte[] bytes = new byte[buf.remaining()];
             buf.get(bytes);
-            String name = PhotoSaver.save(context, bytes);
+            String name = PhotoSaver.save(context, bytes, settings.filenamePrefix);
             finish(id, null, name);
         } catch (Exception e) {
             finish(id, "Save failed: " + e.getMessage(), null);
@@ -241,7 +347,7 @@ public class CameraController {
                         @Override
                         public void onConfigured(CameraCaptureSession s) {
                             session = s;
-                            startPreview();
+                            startPreview(true);
                         }
 
                         @Override
@@ -255,18 +361,6 @@ public class CameraController {
         }
     }
 
-    private void startPreview() {
-        try {
-            CaptureRequest.Builder b = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
-            b.addTarget(previewSurface);
-            settings.applyTo(b);
-            session.setRepeatingRequest(b.build(), null, handler);
-            ui(() -> listener.onStatus("Ready"));
-        } catch (CameraAccessException | IllegalStateException e) {
-            fail("Preview failed: " + e.getMessage());
-        }
-    }
-
     private String findBackCamera() throws CameraAccessException {
         for (String id : manager.getCameraIdList()) {
             Integer facing = manager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING);
@@ -275,22 +369,38 @@ public class CameraController {
         return null;
     }
 
-    /** Largest 4:3 size under maxArea (0 = no limit). Falls back to the largest size if none is 4:3. */
-    private static Size pick43(Size[] sizes, long maxArea) {
+    /**
+     * Largest size with the requested ratio, under maxArea (0 = no limit).
+     * If none matches, the size with the closest ratio is used.
+     */
+    private static Size pick(Size[] sizes, float ratio, long maxArea) {
         Size best = null;
         for (Size s : sizes) {
-            long area = (long) s.getWidth() * s.getHeight();
-            boolean is43 = Math.abs((double) s.getWidth() / s.getHeight() - 4.0 / 3.0) < 0.01;
-            if (!is43 || (maxArea > 0 && area > maxArea)) continue;
-            if (best == null || area > (long) best.getWidth() * best.getHeight()) best = s;
+            if (Math.abs(ratioOf(s) - ratio) > 0.01f) continue;
+            if (maxArea > 0 && area(s) > maxArea) continue;
+            if (best == null || area(s) > area(best)) best = s;
         }
         if (best == null) {
-            best = sizes[0];
             for (Size s : sizes) {
-                if ((long) s.getWidth() * s.getHeight() > (long) best.getWidth() * best.getHeight()) best = s;
+                if (best == null || closer(s, best, ratio)) best = s;
             }
         }
         return best;
+    }
+
+    private static boolean closer(Size a, Size b, float ratio) {
+        float da = Math.abs(ratioOf(a) - ratio);
+        float db = Math.abs(ratioOf(b) - ratio);
+        if (Math.abs(da - db) > 0.01f) return da < db;
+        return area(a) > area(b);
+    }
+
+    private static float ratioOf(Size s) {
+        return (float) Math.max(s.getWidth(), s.getHeight()) / Math.min(s.getWidth(), s.getHeight());
+    }
+
+    private static long area(Size s) {
+        return (long) s.getWidth() * s.getHeight();
     }
 
     private void startThread() {

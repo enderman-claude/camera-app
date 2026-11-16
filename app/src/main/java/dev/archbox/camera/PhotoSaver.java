@@ -16,8 +16,9 @@ import java.util.Locale;
 public final class PhotoSaver {
     private PhotoSaver() {}
 
-    public static String save(Context context, byte[] jpeg) throws IOException {
-        String name = "IMG_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) + ".jpg";
+    public static String save(Context context, byte[] jpeg, String prefix) throws IOException {
+        String base = (prefix == null || prefix.trim().isEmpty()) ? "IMG" : prefix.trim();
+        String name = base + "_" + new SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(new Date()) + ".jpg";
         ContentResolver resolver = context.getContentResolver();
 
         ContentValues values = new ContentValues();
