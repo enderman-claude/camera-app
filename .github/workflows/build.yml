@@ -23,6 +23,7 @@ jobs:
         run: |
           mkdir -p out
           pip install --quiet pillow
+          mkdir -p app/src/main/res/drawable-nodpi
           ICON=app/src/main/res/drawable-nodpi/ic_launcher.png
           python3 tools/gen_icon.py $ICON "$GITHUB_SHA"
           gradle --no-daemon assembleDebug  2>&1 | tee gradle.log
