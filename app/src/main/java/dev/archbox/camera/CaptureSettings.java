@@ -48,22 +48,27 @@ public class CaptureSettings {
     private static final String PREFS = "camera_settings";
 
     public static CaptureSettings load(Context context) {
-        SharedPreferences p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         CaptureSettings s = new CaptureSettings();
-        s.manualFocus = p.getBoolean("manualFocus", s.manualFocus);
-        s.focusPosition = p.getFloat("focusPosition", s.focusPosition);
-        s.evSteps = p.getInt("evSteps", s.evSteps);
-        s.whiteBalance = enumOf(WhiteBalance.class, p.getString("wb", null), s.whiteBalance);
-        s.kelvin = p.getInt("kelvin", s.kelvin);
-        s.aspect = enumOf(Aspect.class, p.getString("aspect", null), s.aspect);
-        s.jpegQuality = p.getInt("jpegQuality", s.jpegQuality);
-        s.timerSeconds = p.getInt("timerSeconds", s.timerSeconds);
-        s.grid = enumOf(Grid.class, p.getString("grid", null), s.grid);
-        s.histogram = p.getBoolean("histogram", s.histogram);
-        s.volumeShutter = p.getBoolean("volumeShutter", s.volumeShutter);
-        s.darkTheme = p.getBoolean("darkTheme", s.darkTheme);
-        s.filenamePrefix = p.getString("filenamePrefix", s.filenamePrefix);
+        s.reload(context);
         return s;
+    }
+
+    /** Re-reads saved values into this object, so the camera keeps the same instance. */
+    public void reload(Context context) {
+        SharedPreferences p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        manualFocus = p.getBoolean("manualFocus", manualFocus);
+        focusPosition = p.getFloat("focusPosition", focusPosition);
+        evSteps = p.getInt("evSteps", evSteps);
+        whiteBalance = enumOf(WhiteBalance.class, p.getString("wb", null), whiteBalance);
+        kelvin = p.getInt("kelvin", kelvin);
+        aspect = enumOf(Aspect.class, p.getString("aspect", null), aspect);
+        jpegQuality = p.getInt("jpegQuality", jpegQuality);
+        timerSeconds = p.getInt("timerSeconds", timerSeconds);
+        grid = enumOf(Grid.class, p.getString("grid", null), grid);
+        histogram = p.getBoolean("histogram", histogram);
+        volumeShutter = p.getBoolean("volumeShutter", volumeShutter);
+        darkTheme = p.getBoolean("darkTheme", darkTheme);
+        filenamePrefix = p.getString("filenamePrefix", filenamePrefix);
     }
 
     public void save(Context context) {

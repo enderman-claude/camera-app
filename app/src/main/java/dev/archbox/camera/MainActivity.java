@@ -2,6 +2,7 @@ package dev.archbox.camera;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Color;
@@ -21,6 +22,10 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
+/**
+ * Camera screen, top to bottom: status bar, viewfinder (sized to the chosen aspect ratio),
+ * empty space, shutter row. Settings live on their own screen.
+ */
 public class MainActivity extends Activity implements TextureView.SurfaceTextureListener {
     private static final int REQ_CAMERA = 1;
 
@@ -29,17 +34,17 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     private CameraController camera;
     private float density;
 
+    private LinearLayout root;
+    private TextView status;
     private FrameLayout viewfinder;
     private int viewfinderWidth;
     private TextureView preview;
     private View flash;
     private GridView grid;
     private HistogramView hist;
-    private SettingsPanel panel;
     private ImageView thumb;
     private ShutterButton shutter;
     private LinearLayout controls;
-    private TextView status;
 
     private SurfaceTexture surface;
     private int latestShotId = -1;
@@ -92,28 +97,6 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         }
     };
 
-    private final SettingsPanel.Callback settingsCallback = new SettingsPanel.Callback() {
-        @Override
-        public void onChanged(boolean needsReopen) {
-            settings.save(MainActivity.this);
-            applyViewfinderAspect();
-            grid.setMode(settings.grid);
-            applyTheme();
-            scheduleHistogram();
-            if (needsReopen && surface != null && hasCameraPermission()) {
-                camera.open(surface);
-            } else {
-                camera.reapply();
-            }
-            refreshShutter();
-        }
-
-        @Override
-        public void onClose() {
-            panel.setVisibility(View.GONE);
-        }
-    };
-
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -121,11 +104,34 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         settings = CaptureSettings.load(this);
         camera = new CameraController(this, listener, settings);
 
-        FrameLayout root = new FrameLayout(this);
+        root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(Color.BLACK);
 
-        // viewfinder: preview, flash, grid, histogram, settings overlay, gear button
+        // top bar: status and settings
+        LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        top.setPadding(dp(16), dp(8), dp(8), dp(8));
+
+        status = new TextView(this);
+        status.setTextColor(Color.WHITE);
+        status.setTextSize(14);
+        status.setSingleLine(true);
+        status.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        status.setText("Starting...");
+        top.addView(status, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        Button settingsButton = new Button(this);
+        settingsButton.setText("Settings");
+        settingsButton.setOnClickListener(v -> startActivity(new Intent(this, SettingsActivity.class)));
+        top.addView(settingsButton);
+        root.addView(top, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // viewfinder: preview, flash, grid, histogram
         viewfinder = new FrameLayout(this);
+        viewfinder.setBackgroundColor(Color.BLACK);
         preview = new TextureView(this);
         preview.setSurfaceTextureListener(this);
         preview.setOnTouchListener((v, e) -> {
@@ -150,62 +156,40 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         histLp.setMargins(dp(12), dp(12), dp(12), dp(12));
         viewfinder.addView(hist, histLp);
 
-        panel = new SettingsPanel(this, settings, camera, settingsCallback);
-        panel.setVisibility(View.GONE);
-        viewfinder.addView(panel, matchParent());
-
-        Button gear = new Button(this);
-        gear.setText("Settings");
-        gear.setOnClickListener(v -> toggleSettings());
-        FrameLayout.LayoutParams gearLp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.END);
-        gearLp.setMargins(dp(8), dp(8), dp(8), dp(8));
-        viewfinder.addView(gear, gearLp);
-
         viewfinder.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
             viewfinderWidth = r - l;
             applyViewfinderAspect();
         });
-        root.addView(viewfinder, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP));
-
-        // bottom controls: status, then [last shot] [shutter] [spacer]
-        controls = new LinearLayout(this);
-        controls.setOrientation(LinearLayout.VERTICAL);
-        controls.setPadding(dp(16), dp(8), dp(16), dp(32));
-
-        status = new TextView(this);
-        status.setGravity(Gravity.CENTER_HORIZONTAL);
-        status.setPadding(0, 0, 0, dp(12));
-        status.setText("Starting...");
-        controls.addView(status, new LinearLayout.LayoutParams(
+        root.addView(viewfinder, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
+        // flexible space keeps the shutter row at the bottom
+        root.addView(new View(this), new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        // shutter row: [last shot] [shutter] [spacer the same width as the thumbnail]
+        controls = new LinearLayout(this);
+        controls.setOrientation(LinearLayout.HORIZONTAL);
+        controls.setGravity(Gravity.CENTER_VERTICAL);
+        controls.setPadding(dp(24), dp(16), dp(24), dp(40));
 
         thumb = new ImageView(this);
         thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
         thumb.setBackgroundColor(0xFF222222);
         thumb.setAlpha(0f);
         thumb.setContentDescription("Last photo");
-        row.addView(thumb, new LinearLayout.LayoutParams(dp(56), dp(56)));
+        controls.addView(thumb, new LinearLayout.LayoutParams(dp(56), dp(56)));
 
-        row.addView(new View(this), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        controls.addView(new View(this), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         shutter = new ShutterButton(this);
         shutter.setOnClickListener(v -> onShutterPressed());
-        row.addView(shutter, new LinearLayout.LayoutParams(dp(72), dp(72)));
+        controls.addView(shutter, new LinearLayout.LayoutParams(dp(72), dp(72)));
 
-        row.addView(new View(this), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        row.addView(new View(this), new LinearLayout.LayoutParams(dp(56), dp(56)));
-
-        controls.addView(row, new LinearLayout.LayoutParams(
+        controls.addView(new View(this), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        controls.addView(new View(this), new LinearLayout.LayoutParams(dp(56), dp(56)));
+        root.addView(controls, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        root.addView(controls, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
 
         setContentView(root);
         applyTheme();
@@ -247,10 +231,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         status.setText("Timer cancelled");
     }
 
-    /**
-     * Optimistic shot: the flash, the last preview frame and "Saving..." appear at
-     * once. The real result replaces them when the JPEG is written.
-     */
+    /** Optimistic shot: flash, last preview frame and "Saving..." appear at once. */
     private void onShutter() {
         int id = camera.takePhoto();
         if (id < 0) {
@@ -297,17 +278,11 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     }
 
     private void applyTheme() {
-        controls.setBackgroundColor(settings.darkTheme ? 0xB3000000 : 0xE6FFFFFF);
-        status.setTextColor(settings.darkTheme ? Color.WHITE : Color.BLACK);
-    }
-
-    private void toggleSettings() {
-        if (panel.getVisibility() == View.VISIBLE) {
-            panel.setVisibility(View.GONE);
-        } else {
-            panel.rebuild();
-            panel.setVisibility(View.VISIBLE);
-        }
+        boolean dark = settings.darkTheme;
+        controls.setBackgroundColor(dark ? Color.BLACK : Color.WHITE);
+        root.setBackgroundColor(dark ? Color.BLACK : 0xFFF2F2F2);
+        status.setTextColor(dark ? Color.WHITE : Color.BLACK);
+        grid.setMode(settings.grid);
     }
 
     private void scheduleHistogram() {
@@ -350,6 +325,10 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     @Override
     protected void onResume() {
         super.onResume();
+        // settings may have changed on the settings screen
+        settings.reload(this);
+        applyTheme();
+        applyViewfinderAspect();
         scheduleHistogram();
         if (!hasCameraPermission()) {
             requestPermissions(new String[] { Manifest.permission.CAMERA }, REQ_CAMERA);

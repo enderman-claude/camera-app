@@ -113,7 +113,7 @@ public class CameraController {
             CameraCharacteristics cc = manager.getCameraCharacteristics(id);
             sensorOrientation = cc.get(CameraCharacteristics.SENSOR_ORIENTATION);
             activeArray = cc.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
-            readLimits(cc);
+            readLimits(limits, cc);
 
             StreamConfigurationMap map = cc.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
             float ratio = settings.aspect.ratio;
@@ -225,18 +225,37 @@ public class CameraController {
 
     // ---- camera thread ----
 
-    private void readLimits(CameraCharacteristics cc) {
+    static void readLimits(Limits target, CameraCharacteristics cc) {
         Float minFocus = cc.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE);
-        limits.minFocusDiopters = minFocus == null ? 0f : minFocus;
-        limits.hasManualFocus = limits.minFocusDiopters > 0f;
+        target.minFocusDiopters = minFocus == null ? 0f : minFocus;
+        target.hasManualFocus = target.minFocusDiopters > 0f;
 
         Range<Integer> ev = cc.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE);
         if (ev != null) {
-            limits.evMin = ev.getLower();
-            limits.evMax = ev.getUpper();
+            target.evMin = ev.getLower();
+            target.evMax = ev.getUpper();
         }
         Rational step = cc.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP);
-        if (step != null && step.getDenominator() != 0) limits.evStep = step.doubleValue();
+        if (step != null && step.getDenominator() != 0) target.evStep = step.doubleValue();
+    }
+
+    /** Limits of the back camera, read without opening it. Used by the settings screen. */
+    public static Limits queryLimits(Context context) {
+        Limits result = new Limits();
+        try {
+            CameraManager m = (CameraManager) context.getSystemService(Context.CAMERA_SERVICE);
+            for (String id : m.getCameraIdList()) {
+                CameraCharacteristics cc = m.getCameraCharacteristics(id);
+                Integer facing = cc.get(CameraCharacteristics.LENS_FACING);
+                if (facing != null && facing == CameraCharacteristics.LENS_FACING_BACK) {
+                    readLimits(result, cc);
+                    break;
+                }
+            }
+        } catch (CameraAccessException | RuntimeException e) {
+            // keep defaults
+        }
+        return result;
     }
 
     private void submit(int id) {
