@@ -18,6 +18,7 @@ import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.Image;
 import android.media.ImageReader;
 import android.media.MediaRecorder;
+import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
@@ -57,6 +58,9 @@ public class CameraController {
         public double evStep = 1.0 / 3.0;
         public boolean hasVideoStabilisation;
         public boolean hasOpticalStabilisation;
+        public boolean zoomSupported;
+        public float minZoom = 1f;
+        public float maxZoom = 1f;
     }
 
     private static final long PREVIEW_MAX_AREA = 1920L * 1440L;
@@ -260,6 +264,16 @@ public class CameraController {
         target.hasOpticalStabilisation = contains(
                 cc.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION),
                 CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON);
+
+        // Zoom ratio exists from Android 11 (API 30). minSdk is 29, so check first.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Range<Float> zoom = cc.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE);
+            if (zoom != null) {
+                target.zoomSupported = true;
+                target.minZoom = zoom.getLower();
+                target.maxZoom = zoom.getUpper();
+            }
+        }
     }
 
     private static boolean contains(int[] values, int target) {

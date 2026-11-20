@@ -55,6 +55,8 @@ public class CaptureSettings {
     public boolean volumeShutter = true;
     public boolean darkTheme = true;
     public Stabilisation stabilisation = Stabilisation.AUTO;
+    /** Zoom ratio chosen with the chips on the viewfinder. Not saved between launches. */
+    public float zoom = 1f;
     public String filenamePrefix = "IMG";
 
     private static final String PREFS = "camera_settings";
@@ -108,6 +110,9 @@ public class CaptureSettings {
         b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
         int ev = Math.max(lim.evMin, Math.min(lim.evMax, evSteps));
         b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, ev);
+        if (lim.zoomSupported) {
+            b.set(CaptureRequest.CONTROL_ZOOM_RATIO, Math.max(lim.minZoom, Math.min(lim.maxZoom, zoom)));
+        }
 
         if (manualFocus && lim.hasManualFocus) {
             b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
