@@ -52,6 +52,8 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     private int countdownLeft;
     private boolean videoMode;
     private Button modeButton;
+    private long recordStartMs;
+    private boolean stopping;
 
     private final Runnable countdownTick = this::tickCountdown;
     private final Runnable histogramTick = new Runnable() {
@@ -67,9 +69,25 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         }
     };
 
+    /** Shows elapsed time while recording, in the status line. */
+    private final Runnable recordTick = new Runnable() {
+        @Override
+        public void run() {
+            if (!camera.isRecording() || stopping) return;
+            long secs = (System.currentTimeMillis() - recordStartMs) / 1000;
+            status.setText("\u25CF REC " + String.format("%02d:%02d", secs / 60, secs % 60));
+            main.postDelayed(this, 500);
+        }
+    };
+
     private final CameraController.Listener listener = new CameraController.Listener() {
         @Override
         public void onStatus(String text) {
+            if ("Recording".equals(text)) {
+                startRecordingUi();
+                return;
+            }
+            if (stopping) stopRecordingUi();
             status.setText(text);
         }
 
@@ -94,6 +112,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
 
         @Override
         public void onError(String message) {
+            if (stopping) stopRecordingUi();
             status.setText(message);
             refreshShutter();
         }
@@ -208,6 +227,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     private void onShutterPressed() {
         if (videoMode) {
             if (camera.isRecording()) {
+                stopping = true;
                 camera.stopVideo();
                 status.setText("Saving video...");
             } else {
@@ -226,6 +246,24 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
             return;
         }
         onShutter();
+    }
+
+    /** Red mode button and a live timer, so recording is obvious at a glance. */
+    private void startRecordingUi() {
+        recordStartMs = System.currentTimeMillis();
+        stopping = false;
+        modeButton.setBackgroundColor(0xFFC62828);
+        modeButton.setTextColor(Color.WHITE);
+        main.removeCallbacks(recordTick);
+        main.post(recordTick);
+    }
+
+    private void stopRecordingUi() {
+        stopping = false;
+        main.removeCallbacks(recordTick);
+        modeButton.setBackgroundColor(0x00000000);
+        modeButton.setTextColor(Color.WHITE);
+        modeButton.setBackgroundResource(android.R.drawable.btn_default);
     }
 
     /** Switches between photo and video. Not allowed while recording. */
