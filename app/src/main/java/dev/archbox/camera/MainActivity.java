@@ -50,6 +50,8 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     private int latestShotId = -1;
     private boolean countingDown;
     private int countdownLeft;
+    private boolean videoMode;
+    private Button modeButton;
 
     private final Runnable countdownTick = this::tickCountdown;
     private final Runnable histogramTick = new Runnable() {
@@ -187,7 +189,11 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         controls.addView(shutter, new LinearLayout.LayoutParams(dp(72), dp(72)));
 
         controls.addView(new View(this), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        controls.addView(new View(this), new LinearLayout.LayoutParams(dp(56), dp(56)));
+        modeButton = new Button(this);
+        modeButton.setText("Video");
+        modeButton.setTextSize(12);
+        modeButton.setOnClickListener(v -> toggleMode());
+        controls.addView(modeButton, new LinearLayout.LayoutParams(dp(64), dp(56)));
         root.addView(controls, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -200,6 +206,15 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     // ---- shutter ----
 
     private void onShutterPressed() {
+        if (videoMode) {
+            if (camera.isRecording()) {
+                camera.stopVideo();
+                status.setText("Saving video...");
+            } else {
+                camera.startVideo();
+            }
+            return;
+        }
         if (countingDown) {
             cancelCountdown();
             return;
@@ -211,6 +226,14 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
             return;
         }
         onShutter();
+    }
+
+    /** Switches between photo and video. Not allowed while recording. */
+    private void toggleMode() {
+        if (camera.isRecording()) return;
+        videoMode = !videoMode;
+        modeButton.setText(videoMode ? "Photo" : "Video");
+        status.setText(videoMode ? "Video mode" : "Photo mode");
     }
 
     private void tickCountdown() {

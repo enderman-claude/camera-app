@@ -8,6 +8,7 @@ import android.graphics.SurfaceTexture;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
 import android.hardware.camera2.CameraCharacteristics;
+import android.hardware.camera2.CameraMetadata;
 import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureFailure;
@@ -16,6 +17,7 @@ import android.hardware.camera2.params.MeteringRectangle;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.Image;
 import android.media.ImageReader;
+import android.media.MediaRecorder;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
@@ -24,6 +26,7 @@ import android.util.Rational;
 import android.util.Size;
 import android.view.Surface;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
 import java.util.Arrays;
@@ -52,6 +55,8 @@ public class CameraController {
         public int evMin = -4;
         public int evMax = 4;
         public double evStep = 1.0 / 3.0;
+        public boolean hasVideoStabilisation;
+        public boolean hasOpticalStabilisation;
     }
 
     private static final long PREVIEW_MAX_AREA = 1920L * 1440L;
@@ -79,6 +84,15 @@ public class CameraController {
     private SurfaceTexture surfaceTexture;
     private int sensorOrientation;
     private Rect activeArray;
+
+    // video
+    private Size videoSize;
+    private MediaRecorder recorder;
+    private Surface recorderSurface;
+    private VideoSaver videoOut;
+    private volatile boolean recording;
+    /** Shown instead of "Ready" once the photo preview comes back after a recording. */
+    private volatile String pendingStatus;
 
     public CameraController(Context context, Listener listener, CaptureSettings settings) {
         this.context = context.getApplicationContext();
@@ -119,6 +133,7 @@ public class CameraController {
             float ratio = settings.aspect.ratio;
             Size preview = pick(map.getOutputSizes(SurfaceTexture.class), ratio, PREVIEW_MAX_AREA);
             Size still = pick(map.getOutputSizes(ImageFormat.JPEG), ratio, 0);
+            videoSize = pick(map.getOutputSizes(MediaRecorder.class), ratio, 1920L * 1440L);
 
             surfaceTexture.setDefaultBufferSize(preview.getWidth(), preview.getHeight());
             previewSurface = new Surface(surfaceTexture);
@@ -214,6 +229,7 @@ public class CameraController {
     }
 
     public void close() {
+        releaseRecorder();
         Handler h = handler;
         if (h != null) h.post(this::cancelPending);
         if (session != null) { session.close(); session = null; }
@@ -237,6 +253,19 @@ public class CameraController {
         }
         Rational step = cc.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP);
         if (step != null && step.getDenominator() != 0) target.evStep = step.doubleValue();
+
+        target.hasVideoStabilisation = contains(
+                cc.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES),
+                CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON);
+        target.hasOpticalStabilisation = contains(
+                cc.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION),
+                CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON);
+    }
+
+    private static boolean contains(int[] values, int target) {
+        if (values == null) return false;
+        for (int v : values) if (v == target) return true;
+        return false;
     }
 
     /** Limits of the back camera, read without opening it. Used by the settings screen. */
@@ -256,6 +285,155 @@ public class CameraController {
             // keep defaults
         }
         return result;
+    }
+
+    public boolean isRecording() {
+        return recording;
+    }
+
+    /**
+     * Starts a video. Recording needs a different session (preview plus recorder surface), so the
+     * photo session is closed and rebuilt when recording stops.
+     */
+    public void startVideo() {
+        Handler h = handler;
+        if (h == null) return;
+        h.post(() -> {
+            if (recording || device == null || session == null || videoSize == null) return;
+            if (inFlight.get() > 0) {
+                ui(() -> listener.onError("Still saving, one moment"));
+                return;
+            }
+            try {
+                videoOut = VideoSaver.begin(context, settings.filenamePrefix);
+                recorder = new MediaRecorder();
+                recorder.setVideoSource(MediaRecorder.VideoSource.SURFACE);
+                recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
+                recorder.setOutputFile(videoOut.descriptor().getFileDescriptor());
+                recorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264);
+                recorder.setVideoSize(videoSize.getWidth(), videoSize.getHeight());
+                recorder.setVideoFrameRate(30);
+                recorder.setVideoEncodingBitRate(16_000_000);
+                recorder.setOrientationHint(sensorOrientation);
+                recorder.prepare();
+                recorderSurface = recorder.getSurface();
+            } catch (IOException | RuntimeException e) {
+                String message = "Could not start video: " + e.getMessage();
+                releaseRecorder();
+                ui(() -> listener.onError(message));
+                return;
+            }
+            closeSession();
+            try {
+                device.createCaptureSession(
+                        Arrays.asList(previewSurface, recorderSurface),
+                        new CameraCaptureSession.StateCallback() {
+                            @Override
+                            public void onConfigured(CameraCaptureSession s) {
+                                session = s;
+                                startRecordRequest();
+                            }
+
+                            @Override
+                            public void onConfigureFailed(CameraCaptureSession s) {
+                                releaseRecorder();
+                                createSession();
+                                ui(() -> listener.onError("Video session failed"));
+                            }
+                        },
+                        handler);
+            } catch (CameraAccessException | IllegalStateException e) {
+                releaseRecorder();
+                createSession();
+                ui(() -> listener.onError("Video session error: " + e.getMessage()));
+            }
+        });
+    }
+
+    private void startRecordRequest() {
+        try {
+            CaptureRequest.Builder b = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
+            b.addTarget(previewSurface);
+            b.addTarget(recorderSurface);
+            settings.applyTo(b, limits);
+            applyVideoStabilisation(b);
+            session.setRepeatingRequest(b.build(), null, handler);
+            recorder.start();
+            recording = true;
+            ui(() -> listener.onStatus("Recording"));
+        } catch (CameraAccessException | IllegalStateException e) {
+            releaseRecorder();
+            createSession();
+            ui(() -> listener.onError("Could not record: " + e.getMessage()));
+        }
+    }
+
+    /** Stops recording, keeps the file if it has content, and restores the photo session. */
+    public void stopVideo() {
+        Handler h = handler;
+        if (h == null) return;
+        h.post(() -> {
+            if (!recording) return;
+            boolean ok;
+            try {
+                recorder.stop();
+                ok = true;
+            } catch (RuntimeException e) {
+                ok = false; // stop() throws when the recording is too short to contain data
+            }
+            VideoSaver out = videoOut;
+            videoOut = null;
+            releaseRecorder();
+            if (ok && out != null) {
+                out.finish(context);
+                pendingStatus = "Saved " + out.name;
+            } else {
+                if (out != null) out.discard(context);
+                pendingStatus = "Recording too short, discarded";
+            }
+            closeSession();
+            createSession();
+        });
+    }
+
+    private void applyVideoStabilisation(CaptureRequest.Builder b) {
+        boolean wanted = settings.stabilisation != CaptureSettings.Stabilisation.OFF;
+        boolean eis = wanted && limits.hasVideoStabilisation;
+        b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                eis ? CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON
+                    : CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF);
+        if (limits.hasOpticalStabilisation) {
+            b.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                    wanted ? CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON
+                           : CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_OFF);
+        }
+    }
+
+    private void closeSession() {
+        CameraCaptureSession s = session;
+        session = null;
+        if (s != null) s.close();
+    }
+
+    /** Stops the recorder and removes any unfinished file. Safe to call at any time. */
+    private void releaseRecorder() {
+        recording = false;
+        if (recorder != null) {
+            try {
+                recorder.release();
+            } catch (RuntimeException ignored) {
+                // already stopped or never started
+            }
+            recorder = null;
+        }
+        if (recorderSurface != null) {
+            recorderSurface.release();
+            recorderSurface = null;
+        }
+        if (videoOut != null) {
+            videoOut.discard(context);
+            videoOut = null;
+        }
     }
 
     private void submit(int id) {
@@ -282,7 +460,11 @@ public class CameraController {
             b.addTarget(previewSurface);
             settings.applyTo(b, limits);
             session.setRepeatingRequest(b.build(), null, handler);
-            if (announce) ui(() -> listener.onStatus("Ready"));
+            if (announce) {
+                String text = pendingStatus != null ? pendingStatus : "Ready";
+                pendingStatus = null;
+                ui(() -> listener.onStatus(text));
+            }
         } catch (CameraAccessException | IllegalStateException e) {
             fail("Preview failed: " + e.getMessage());
         }

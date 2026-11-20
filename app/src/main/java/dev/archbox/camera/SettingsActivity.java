@@ -124,6 +124,15 @@ public class SettingsActivity extends Activity {
             s.aspect = a;
             save();
         }));
+        col.addView(body("Video stabilisation"));
+        CaptureSettings.Stabilisation[] stab = CaptureSettings.Stabilisation.values();
+        String[] stabLabels = new String[stab.length];
+        for (int i = 0; i < stab.length; i++) stabLabels[i] = stab[i].label;
+        col.addView(spinner(stabLabels, s.stabilisation.ordinal(), i -> {
+            if (stab[i] == s.stabilisation) return;
+            s.stabilisation = stab[i];
+            save();
+        }));
         col.addView(body("JPEG quality"));
         col.addView(seek(50, 100, s.jpegQuality, v -> {
             s.jpegQuality = v;

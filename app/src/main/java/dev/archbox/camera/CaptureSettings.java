@@ -28,6 +28,17 @@ public class CaptureSettings {
 
     public enum Grid { OFF, THIRDS, GOLDEN, SQUARE, CROSS }
 
+    /** Video stabilisation. Auto uses it wherever the camera reports support. */
+    public enum Stabilisation {
+        OFF("Off"), AUTO("Auto"), ON("On");
+
+        public final String label;
+
+        Stabilisation(String label) {
+            this.label = label;
+        }
+    }
+
     /** Manual focus on or off. Tapping the viewfinder turns it off. */
     public boolean manualFocus = false;
     /** 0 = infinity, 1 = closest focus the lens supports. */
@@ -43,6 +54,7 @@ public class CaptureSettings {
     public boolean histogram = false;
     public boolean volumeShutter = true;
     public boolean darkTheme = true;
+    public Stabilisation stabilisation = Stabilisation.AUTO;
     public String filenamePrefix = "IMG";
 
     private static final String PREFS = "camera_settings";
@@ -68,6 +80,7 @@ public class CaptureSettings {
         histogram = p.getBoolean("histogram", histogram);
         volumeShutter = p.getBoolean("volumeShutter", volumeShutter);
         darkTheme = p.getBoolean("darkTheme", darkTheme);
+        stabilisation = enumOf(Stabilisation.class, p.getString("stabilisation", null), stabilisation);
         filenamePrefix = p.getString("filenamePrefix", filenamePrefix);
     }
 
@@ -85,6 +98,7 @@ public class CaptureSettings {
                 .putBoolean("histogram", histogram)
                 .putBoolean("volumeShutter", volumeShutter)
                 .putBoolean("darkTheme", darkTheme)
+                .putString("stabilisation", stabilisation.name())
                 .putString("filenamePrefix", filenamePrefix)
                 .apply();
     }
