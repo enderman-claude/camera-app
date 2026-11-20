@@ -308,7 +308,7 @@ public class CameraController {
             ByteBuffer buf = image.getPlanes()[0].getBuffer();
             byte[] bytes = new byte[buf.remaining()];
             buf.get(bytes);
-            String name = PhotoSaver.save(context, bytes, settings.filenamePrefix);
+            String name = PhotoSaver.save(context, bytes, settings.filenamePrefix, settings);
             finish(id, null, name);
         } catch (Exception e) {
             finish(id, "Save failed: " + e.getMessage(), null);

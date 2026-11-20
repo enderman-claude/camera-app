@@ -20,4 +20,6 @@ android {
 
 dependencies {
     implementation("androidx.annotation:annotation:1.8.0")
+    // Apache-2.0, Google AndroidX. Writes EXIF metadata into saved JPEGs.
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
 }
